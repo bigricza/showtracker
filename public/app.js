@@ -260,6 +260,30 @@ const footer = () => `<div class="foot">
   <span>Show data from <a href="https://www.tvmaze.com" target="_blank" rel="noopener">TVmaze</a> (CC BY-SA).</span>
 </div>`;
 
+/* ---------- filters ---------- */
+const FILTERS = [
+  { key: "watching", label: "Watching", hint: "Started, with episodes left" },
+  { key: "new", label: "Not started", hint: "Nothing watched yet" },
+  { key: "caughtup", label: "Caught up", hint: "All aired episodes watched, more to come" },
+  { key: "finished", label: "Finished", hint: "Watched everything and the series has ended" }
+];
+const FILTER_KEY = "showtracker-filters-v1";
+const DEFAULT_FILTERS = ["watching", "new"];
+let filters = new Set(loadJSON(FILTER_KEY, DEFAULT_FILTERS));
+
+function stateOf(s) {
+  const p = progress(s.id);
+  if (p.loading) return "watching";
+  if (p.next) return p.watched ? "watching" : "new";
+  return s.status === "Ended" && !p.upcoming ? "finished" : "caughtup";
+}
+function setFilters(keys) { filters = new Set(keys); saveJSON(FILTER_KEY, [...filters]); render(); }
+
+const filterBar = counts => `<div class="filters" role="group" aria-label="Filter shows">
+  ${FILTERS.map(f => `<button type="button" class="fchip" data-act="filter" data-f="${f.key}" aria-pressed="${filters.has(f.key)}" title="${esc(f.hint)}">
+    ${esc(f.label)}<span class="n">${counts[f.key]}</span></button>`).join("")}
+</div>`;
+
 function render() {
   if (!user) return;
   const list = Object.values(shows);
@@ -289,17 +313,24 @@ function render() {
     html = `<div class="loading">Loading your shows…</div>`;
   } else if (!list.length) {
     html = emptyLibrary();
-  } else if (view === "next") {
-    const caught = list.filter(s => !progress(s.id).next);
-    const sorted = withNext.sort((a, b) => (b.lastTouch || b.addedAt) - (a.lastTouch || a.addedAt));
-    html = sorted.length ? sorted.map(s => showRow(s, "next")).join("") : `<div class="empty"><h3>You're all caught up</h3><p>Nothing aired is left unwatched. Check Coming up for what airs next.</p></div>`;
-    if (caught.length && sorted.length) html += `<h2 class="sec">Caught up</h2>` + caught.map(s => showRow(s, "next")).join("");
   } else if (view === "coming") {
     const sorted = coming.sort((a, b) => progress(a.id).upcoming.t - progress(b.id).upcoming.t);
     html = sorted.length ? `<h2 class="sec">Next 30 days</h2>` + sorted.map(s => showRow(s, "coming")).join("")
       : `<div class="empty"><h3>Nothing airing in the next 30 days</h3><p>New episodes for shows in your list will show up here as they get scheduled.</p></div>`;
   } else {
-    html = list.sort((a, b) => a.name.localeCompare(b.name)).map(s => showRow(s, "next")).join("");
+    // "Up next" sorts by what you touched last; "All shows" sorts A–Z. Both use the same filters.
+    const counts = Object.fromEntries(FILTERS.map(f => [f.key, 0]));
+    list.forEach(s => counts[stateOf(s)]++);
+    const visible = list.filter(s => filters.has(stateOf(s)));
+    const sorted = view === "next"
+      ? visible.sort((a, b) => (b.lastTouch || b.addedAt) - (a.lastTouch || a.addedAt))
+      : visible.sort((a, b) => a.name.localeCompare(b.name));
+    const hidden = list.length - visible.length;
+    html = filterBar(counts);
+    html += sorted.length
+      ? sorted.map(s => showRow(s, "next")).join("")
+      : `<div class="empty"><h3>${filters.size ? "Nothing matches these filters" : "No filters selected"}</h3><p>Turn on another filter above to see more of your shows.</p></div>`;
+    if (hidden) html += `<p class="hidden-note">${hidden} show${hidden === 1 ? "" : "s"} hidden by filters. <button class="linkbtn" data-act="filterAll">Show all</button></p>`;
   }
   $("#main").innerHTML = html + footer();
   if (openShowId) renderPanel();
@@ -453,6 +484,12 @@ document.addEventListener("click", async e => {
   if (a === "open") openShow(el.dataset.id);
   else if (a === "close") closeShow();
   else if (a === "add") addShow(Number(el.dataset.id), el.dataset.name);
+  else if (a === "filter") {
+    const f = el.dataset.f, next = new Set(filters);
+    next.has(f) ? next.delete(f) : next.add(f);
+    setFilters([...next]);
+  }
+  else if (a === "filterAll") setFilters(FILTERS.map(f => f.key));
   else if (a === "suggest") { $("#q").value = el.dataset.q; doSearch(el.dataset.q); }
   else if (a === "watch") {
     const epId = Number(el.dataset.ep), id = el.dataset.show || showIdOfEp(epId);

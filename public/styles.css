@@ -139,3 +139,11 @@ details.season[open] summary .chev{transform:rotate(90deg)}
 .signin label{font-size:.78rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:6px}
 .signin input{padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface)}
 .signin .btn{margin-top:12px;align-self:flex-start}
+/* filters */
+.filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+.fchip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--muted);font-weight:600;font-size:.84rem}
+.fchip .n{font-family:var(--mono);font-size:.72rem;opacity:.75}
+.fchip:hover{border-color:var(--fg);color:var(--fg)}
+.fchip[aria-pressed="true"]{background:var(--fg);border-color:var(--fg);color:var(--bg)}
+.hidden-note{color:var(--muted);font-size:.85rem;margin:6px 0 0}
+.linkbtn{background:none;border:0;padding:0;color:var(--accent);font-weight:600;text-decoration:underline;cursor:pointer}
