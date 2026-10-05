@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#141312" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f3f1ee" media="(prefers-color-scheme: light)">
+<title>Show Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Signed-out screen -->
+<section class="gate" id="gate" hidden>
+  <h1><i aria-hidden="true"></i>Show Tracker</h1>
+  <p>Track every show you're watching, see what's next, and know when new episodes air. Your progress syncs across your phone and laptop.</p>
+  <button class="btn primary" id="signInBtn" type="button">Sign in with Google</button>
+  <p class="code" id="gateMsg"></p>
+</section>
+
+<!-- App -->
+<div id="app" hidden>
+  <header>
+    <div class="bar">
+      <div class="top">
+        <h1 class="brand"><i aria-hidden="true"></i>Show Tracker</h1>
+        <form class="search" id="searchForm" role="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="q" type="search" placeholder="Search for a show to add" autocomplete="off" aria-label="Search shows">
+        </form>
+        <div class="user">
+          <span class="sync" id="sync">Synced</span>
+          <img id="avatar" alt="" referrerpolicy="no-referrer" hidden>
+          <span class="nm" id="userName"></span>
+          <button class="btn small" id="signOutBtn" type="button">Sign out</button>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab" role="tab" data-view="next" aria-selected="true">Up next<span class="n" id="nNext"></span></button>
+        <button class="tab" role="tab" data-view="coming">Coming up<span class="n" id="nComing"></span></button>
+        <button class="tab" role="tab" data-view="library">All shows<span class="n" id="nLib"></span></button>
+        <button class="tab" role="tab" data-view="search" id="searchTab" hidden>Search results</button>
+      </nav>
+    </div>
+  </header>
+  <main id="main"><div class="loading">Loading your shows…</div></main>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="panel" id="panel" hidden aria-modal="true" role="dialog"></aside>
+<div class="toast" id="toast" hidden></div>
+<input type="file" id="importFile" accept="application/json" hidden>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

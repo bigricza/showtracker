@@ -1,0 +1,17 @@
+# Your Firebase project details (see public/firebase-config.example.js)
+public/firebase-config.js
+.firebaserc
+
+# Firebase CLI
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# Backups exported from the app
+showtracker-backup-*.json
+episode-log-*.json
+
+node_modules/
+.DS_Store
+Thumbs.db
