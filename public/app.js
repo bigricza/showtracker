@@ -518,8 +518,11 @@ $("#importFile").addEventListener("change", async e => {
 });
 
 /* ---------- auth & live sync ---------- */
+let authResolved = false;
 function onUser(u) {
-  if ((u?.id || null) === (user?.id || null)) return;
+  // Skip repeats (e.g. token refreshes), but always run the first time so the sign-in screen appears when signed out.
+  if (authResolved && (u?.id || null) === (user?.id || null)) return;
+  authResolved = true;
   user = u;
   if (channel) { sb.removeChannel(channel); channel = null; }
   shows = {}; loaded = false; closeShow();
