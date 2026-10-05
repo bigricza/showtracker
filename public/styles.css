@@ -135,3 +135,7 @@ details.season[open] summary .chev{transform:rotate(90deg)}
 .sync::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good)}
 .sync.off::before{background:var(--muted)}
 @media (max-width:560px){.user .nm{display:none}}
+.signin{display:flex;flex-direction:column;gap:6px;width:100%;max-width:340px}
+.signin label{font-size:.78rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-top:6px}
+.signin input{padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface)}
+.signin .btn{margin-top:12px;align-self:flex-start}

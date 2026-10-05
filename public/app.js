@@ -1,48 +1,39 @@
-// Show Tracker: TVmaze for show/episode data, Firebase Auth + Firestore for per-user progress.
-const FB = "https://www.gstatic.com/firebasejs/12.19.0";
-const { initializeApp } = await import(`${FB}/firebase-app.js`);
-const {
-  getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut
-} = await import(`${FB}/firebase-auth.js`);
-const {
-  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, deleteField, writeBatch
-} = await import(`${FB}/firebase-firestore.js`);
+// Show Tracker: TVmaze for show/episode data, Supabase for sign-in and per-user progress.
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/+esm";
 
 const $ = s => document.querySelector(s);
 const gateMsg = $("#gateMsg");
 
-/* ---------- Firebase setup ---------- */
-let firebaseConfig;
+/* ---------- Supabase setup ---------- */
+let SUPABASE_URL, SUPABASE_KEY;
 try {
-  ({ firebaseConfig } = await import("./firebase-config.js"));
+  ({ SUPABASE_URL, SUPABASE_KEY } = await import("./config.js"));
+  if (!SUPABASE_URL || !SUPABASE_KEY) throw new Error("empty config");
 } catch (e) {
   $("#gate").hidden = false;
-  $("#signInBtn").disabled = true;
-  gateMsg.textContent = "Missing firebase-config.js. Copy firebase-config.example.js to firebase-config.js and paste in your project's web config.";
+  $("#signInForm").hidden = true;
+  gateMsg.textContent = "Missing config.js. Run `node scripts/write-config.mjs` with SUPABASE_URL and SUPABASE_KEY set (see README).";
   throw e;
 }
-
-const fbApp = initializeApp(firebaseConfig);
-const auth = getAuth(fbApp);
-const db = initializeFirestore(fbApp, {
-  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
-});
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
+const TABLE = "showtracker_shows";
 
 /* ---------- constants & state ---------- */
 const API = "https://api.tvmaze.com";
 const EP_CACHE_KEY = "showtracker-eps-v1";
+const ROWS_CACHE_KEY = "showtracker-rows-v1";
 const REFRESH_MS = 12 * 3600e3;
 
-let user = null, unsubShows = null;
-let shows = {};                 // showId -> Firestore doc data (metadata, myLink, watched map)
-let epCache = loadEpCache();    // showId -> { fetchedAt, eps: [...] }
+let user = null, channel = null;
+let shows = {};                 // showId -> { id, name, image, ..., myLink, watched, addedAt, lastTouch }
+let epCache = loadJSON(EP_CACHE_KEY, {});
 let view = "next", searchResults = [], openShowId = null, searching = false, editingLink = false;
-let loaded = false;
+let loaded = false, pending = 0;
 const fetching = new Set();
 
-function loadEpCache() { try { return JSON.parse(localStorage.getItem(EP_CACHE_KEY)) || {}; } catch (e) { return {}; } }
-function saveEpCache() { try { localStorage.setItem(EP_CACHE_KEY, JSON.stringify(epCache)); } catch (e) { /* cache only; safe to lose */ } }
+function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* cache only */ } }
+const saveEpCache = () => saveJSON(EP_CACHE_KEY, epCache);
 
 /* ---------- helpers ---------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -59,7 +50,6 @@ const rel = t => {
 };
 const epsOf = id => epCache[id]?.eps || [];
 const watchedOf = id => shows[id]?.watched || {};
-const showRef = id => doc(db, "users", user.uid, "shows", String(id));
 
 async function api(path, tries = 2) {
   const r = await fetch(API + path);
@@ -70,7 +60,7 @@ async function api(path, tries = 2) {
 
 function slimShow(s) {
   return {
-    id: s.id, name: s.name,
+    name: s.name,
     image: s.image ? (s.image.medium || s.image.original) : null,
     network: s.webChannel?.name || s.network?.name || null,
     status: s.status || null, premiered: s.premiered || null, genres: s.genres || [],
@@ -84,8 +74,45 @@ function slimEps(list) {
     .sort((a, b) => a.s - b.s || a.n - b.n);
 }
 
-/* Fetch episodes (and fresh metadata) from TVmaze. Episodes stay in a local cache; only metadata changes go to Firestore. */
+/* ---------- data layer (Supabase) ---------- */
+const fromRow = r => ({
+  ...(r.info || {}), id: r.show_id, myLink: r.my_link, watched: r.watched || {},
+  addedAt: Date.parse(r.added_at), lastTouch: Date.parse(r.last_touch)
+});
+const toRow = s => ({
+  show_id: Number(s.id),
+  info: { name: s.name, image: s.image ?? null, network: s.network ?? null, status: s.status ?? null, premiered: s.premiered ?? null,
+          genres: s.genres || [], officialSite: s.officialSite ?? null, summary: (s.summary || "").slice(0, 1500), rating: s.rating ?? null },
+  my_link: s.myLink ?? null, watched: s.watched || {},
+  added_at: new Date(s.addedAt || now()).toISOString(), last_touch: new Date(s.lastTouch || now()).toISOString()
+});
+
+function setSync() {
+  const el = $("#sync"), offline = !navigator.onLine;
+  el.textContent = pending ? "Saving…" : offline ? "Offline" : "Synced";
+  el.classList.toggle("off", !!pending || offline);
+}
+async function track(promise) {
+  pending++; setSync();
+  try { const { data, error } = await promise; if (error) throw error; return data; }
+  finally { pending--; setSync(); }
+}
+
+async function loadShows() {
+  const { data, error } = await sb.from(TABLE).select("*");
+  if (error) { toast(`Couldn't load your shows (${error.message}).`); return; }
+  shows = Object.fromEntries(data.map(r => [String(r.show_id), fromRow(r)]));
+  saveJSON(ROWS_CACHE_KEY + ":" + user.id, data);
+  loaded = true;
+  render();
+  loadMissingEpisodes();
+}
+let reloadTimer;
+const scheduleReload = () => { clearTimeout(reloadTimer); reloadTimer = setTimeout(() => { if (!pending) loadShows(); else scheduleReload(); }, 400); };
+
+/* Fetch episodes (and fresh details) from TVmaze. Episodes stay in a local cache; only detail changes are saved. */
 async function loadEpisodes(id, { force = false } = {}) {
+  id = String(id);
   const c = epCache[id];
   if (!force && c && now() - c.fetchedAt < REFRESH_MS) return;
   if (fetching.has(id)) return;
@@ -96,7 +123,8 @@ async function loadEpisodes(id, { force = false } = {}) {
     saveEpCache();
     const meta = slimShow(show), cur = shows[id];
     if (user && cur && ["name", "image", "network", "status", "officialSite", "rating"].some(k => meta[k] !== cur[k])) {
-      updateDoc(showRef(id), meta).catch(() => {});
+      Object.assign(cur, meta);
+      track(sb.from(TABLE).update({ info: toRow(cur).info }).eq("show_id", Number(id))).catch(() => {});
     }
   } finally { fetching.delete(id); }
 }
@@ -126,41 +154,53 @@ function progress(id) {
 
 /* ---------- writes ---------- */
 let lastUndo = null;
-async function setWatched(id, epIds, on) {
+function applyWatchedLocal(id, epIds, on) {
+  const s = shows[id]; if (!s) return;
+  s.watched = { ...s.watched };
+  epIds.forEach(e => { if (on) s.watched[e] = now(); else delete s.watched[e]; });
+  s.lastTouch = now();
+}
+async function setWatched(id, epIds, on, { undoable = true } = {}) {
+  id = String(id);
+  if (!epIds.length) return;
   const w = watchedOf(id);
-  const before = Object.fromEntries(epIds.map(e => [e, w[e] ?? null]));
-  const patch = { lastTouch: now() };
-  epIds.forEach(e => patch[`watched.${e}`] = on ? now() : deleteField());
-  lastUndo = () => {
-    const undo = {};
-    Object.entries(before).forEach(([e, v]) => undo[`watched.${e}`] = v ?? deleteField());
-    return updateDoc(showRef(id), undo);
+  const wasOn = epIds.filter(e => w[e]), wasOff = epIds.filter(e => !w[e]);
+  if (undoable) lastUndo = async () => {
+    await setWatched(id, on ? wasOff : wasOn, !on, { undoable: false });
   };
-  try { await updateDoc(showRef(id), patch); } catch (e) { toast("Couldn't save that change. Check your connection."); }
+  applyWatchedLocal(id, epIds, on); render();
+  try { await track(sb.rpc("showtracker_set_watched", { p_show_id: Number(id), p_eps: epIds.map(Number), p_on: on })); }
+  catch (e) { toast("Couldn't save that change. Check your connection."); scheduleReload(); }
 }
 
 async function addShow(id, name) {
   if (shows[id]) { openShow(id); return; }
   toast(`Adding ${name}…`, false);
   try {
-    await loadEpisodes(id, { force: true });
     const show = await api(`/shows/${id}`);
-    await setDoc(showRef(id), { ...slimShow(show), myLink: null, watched: {}, addedAt: now(), lastTouch: now() });
+    await loadEpisodes(id, { force: true });
+    const s = { id, ...slimShow(show), myLink: null, watched: {}, addedAt: now(), lastTouch: now() };
+    await track(sb.from(TABLE).insert(toRow(s)));
+    shows[String(id)] = s; render();
     toast(`Added ${name}`);
   } catch (e) { toast(`Couldn't add ${name}. Check your connection and try again.`); }
 }
 
 async function removeShow(id) {
+  id = String(id);
   const snapshot = shows[id]; if (!snapshot) return;
   closeShow();
-  lastUndo = () => setDoc(showRef(id), snapshot);
-  try { await deleteDoc(showRef(id)); toast(`Removed ${snapshot.name}`, true); }
-  catch (e) { toast("Couldn't remove the show. Try again."); }
+  delete shows[id]; render();
+  lastUndo = async () => { shows[id] = snapshot; render(); await track(sb.from(TABLE).upsert(toRow(snapshot))); };
+  try { await track(sb.from(TABLE).delete().eq("show_id", Number(id))); toast(`Removed ${snapshot.name}`, true); }
+  catch (e) { shows[id] = snapshot; render(); toast("Couldn't remove the show. Try again."); }
 }
 
 async function saveLink(id, url) {
-  try { await updateDoc(showRef(id), { myLink: url }); toast(url ? "Link saved" : "Link removed"); }
-  catch (e) { toast("Couldn't save the link. Try again."); }
+  const s = shows[id]; if (!s) return;
+  const prev = s.myLink; s.myLink = url; render();
+  try { await track(sb.from(TABLE).update({ my_link: url }).eq("show_id", Number(id))); toast(url ? "Link saved" : "Link removed"); }
+  catch (e) { s.myLink = prev; render(); toast("Couldn't save the link. Try again."); }
 }
 
 /* ---------- toast ---------- */
@@ -169,7 +209,7 @@ function toast(msg, undo) {
   const t = $("#toast");
   t.innerHTML = `<span>${esc(msg)}</span>` + (undo ? `<button type="button" id="undoBtn">Undo</button>` : "");
   t.hidden = false;
-  if (undo) $("#undoBtn").onclick = () => { lastUndo && lastUndo().catch(() => toast("Couldn't undo. Try again.")); lastUndo = null; t.hidden = true; };
+  if (undo) $("#undoBtn").onclick = () => { const u = lastUndo; lastUndo = null; t.hidden = true; u && u().catch(() => toast("Couldn't undo. Try again.")); };
   clearTimeout(toastTimer);
   if (undo !== false) toastTimer = setTimeout(() => t.hidden = true, 5000);
 }
@@ -209,7 +249,7 @@ function showRow(s, mode) {
 const SUGGEST = ["Severance", "The Bear", "Slow Horses", "Shōgun", "The White Lotus", "Andor"];
 const emptyLibrary = () => `<section class="empty">
   <h3>Add your first show</h3>
-  <p>Search above for anything you're watching. Each show comes in with every season and episode, and the tracker works out what's next. Have a backup from the single-file version? Use Import below.</p>
+  <p>Search above for anything you're watching. Each show comes in with every season and episode, and the tracker works out what's next. Have a backup from the single-file Episode Log? Use Import below.</p>
   <div class="suggest">${SUGGEST.map(n => `<button class="btn small" data-act="suggest" data-q="${esc(n)}">${esc(n)}</button>`).join("")}</div>
 </section>`;
 
@@ -370,46 +410,40 @@ function exportBackup() {
 // Accepts this app's backups (version 2) and the single-file Episode Log backups (shows with eps + a flat watched map).
 async function importBackup(data) {
   if (!data?.shows) throw new Error("bad file");
-  const docs = [];
+  const rows = [];
   for (const [id, s] of Object.entries(data.shows)) {
     let watched = s.watched || {};
     if (Array.isArray(s.eps)) {
       if (data.watched) watched = Object.fromEntries(s.eps.filter(e => data.watched[e.id]).map(e => [e.id, data.watched[e.id]]));
       epCache[id] = { fetchedAt: s.fetchedAt || 0, eps: s.eps.map(({ id, s: sn, n, name, t }) => ({ id, s: sn, n, name, t })) };
     }
-    const existing = shows[id]?.watched || {};
-    docs.push([id, {
-      id: Number(id), name: s.name, image: s.image ?? null, network: s.network ?? null, status: s.status ?? null,
-      premiered: s.premiered ?? null, genres: s.genres || [], officialSite: s.officialSite ?? null,
-      summary: (s.summary || "").slice(0, 1500), rating: s.rating ?? null,
-      myLink: s.myLink ?? shows[id]?.myLink ?? null,
-      watched: { ...existing, ...watched }, addedAt: s.addedAt || now(), lastTouch: s.lastTouch || s.addedAt || now()
-    }]);
+    const existing = shows[id];
+    rows.push(toRow({ ...s, id, myLink: s.myLink ?? existing?.myLink ?? null, watched: { ...(existing?.watched || {}), ...watched } }));
   }
   saveEpCache();
-  for (let i = 0; i < docs.length; i += 400) {
-    const batch = writeBatch(db);
-    docs.slice(i, i + 400).forEach(([id, d]) => batch.set(showRef(id), d));
-    await batch.commit();
-  }
-  return docs.length;
+  for (let i = 0; i < rows.length; i += 200) await track(sb.from(TABLE).upsert(rows.slice(i, i + 200)));
+  await loadShows();
+  return rows.length;
 }
 
 /* ---------- events ---------- */
-$("#signInBtn").addEventListener("click", async () => {
-  const provider = new GoogleAuthProvider();
-  gateMsg.textContent = "";
-  try { await signInWithPopup(auth, provider); }
-  catch (e) {
-    if (e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment") return signInWithRedirect(auth, provider);
-    if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") gateMsg.textContent = `Sign-in failed (${e.code || e.message}).`;
-  }
+$("#signInForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const btn = $("#signInBtn");
+  gateMsg.textContent = ""; btn.disabled = true; btn.textContent = "Signing in…";
+  const { error } = await sb.auth.signInWithPassword({ email: $("#email").value.trim(), password: $("#password").value });
+  btn.disabled = false; btn.textContent = "Sign in";
+  if (error) gateMsg.textContent = error.message === "Invalid login credentials" ? "That email and password don't match. Try again." : `Sign-in failed: ${error.message}`;
+  else $("#password").value = "";
 });
-$("#signOutBtn").addEventListener("click", () => signOut(auth));
+$("#signOutBtn").addEventListener("click", () => sb.auth.signOut());
 $("#searchForm").addEventListener("submit", e => { e.preventDefault(); $("#q").blur(); doSearch($("#q").value); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => { view = t.dataset.view; render(); }));
 $("#scrim").addEventListener("click", closeShow);
 document.addEventListener("keydown", e => { if (e.key === "Escape" && openShowId) closeShow(); });
+window.addEventListener("online", () => { setSync(); if (user) loadShows(); });
+window.addEventListener("offline", setSync);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && user) loadShows(); });
 
 const showIdOfEp = epId => Object.keys(shows).find(id => epsOf(id).some(e => e.id === epId));
 
@@ -484,29 +518,28 @@ $("#importFile").addEventListener("change", async e => {
 });
 
 /* ---------- auth & live sync ---------- */
-onAuthStateChanged(auth, u => {
+function onUser(u) {
+  if ((u?.id || null) === (user?.id || null)) return;
   user = u;
-  if (unsubShows) { unsubShows(); unsubShows = null; }
+  if (channel) { sb.removeChannel(channel); channel = null; }
   shows = {}; loaded = false; closeShow();
   $("#gate").hidden = !!u;
   $("#app").hidden = !u;
   if (!u) return;
 
-  $("#userName").textContent = u.displayName || u.email || "";
-  const av = $("#avatar");
-  if (u.photoURL) { av.src = u.photoURL; av.hidden = false; } else av.hidden = true;
+  $("#userName").textContent = u.email || "";
+  const cached = loadJSON(ROWS_CACHE_KEY + ":" + u.id, null);
+  if (cached) { shows = Object.fromEntries(cached.map(r => [String(r.show_id), fromRow(r)])); loaded = true; }
+  render(); setSync();
+  loadShows();
+  channel = sb.channel("showtracker-" + u.id)
+    .on("postgres_changes", { event: "*", schema: "public", table: TABLE, filter: `user_id=eq.${u.id}` }, scheduleReload)
+    .subscribe();
+}
 
-  const sync = $("#sync");
-  unsubShows = onSnapshot(collection(db, "users", u.uid, "shows"), { includeMetadataChanges: true }, snap => {
-    const next = {};
-    snap.forEach(d => next[d.id] = d.data());
-    shows = next; loaded = true;
-    const pending = snap.metadata.hasPendingWrites, offline = snap.metadata.fromCache;
-    sync.textContent = pending ? "Saving…" : offline ? "Offline" : "Synced";
-    sync.classList.toggle("off", pending || offline);
-    render();
-    loadMissingEpisodes();
-  }, err => {
-    toast(`Couldn't load your shows (${err.code}).`);
-  });
+sb.auth.onAuthStateChange((_event, session) => {
+  // Defer: Supabase recommends not awaiting other Supabase calls inside this callback.
+  setTimeout(() => onUser(session?.user || null), 0);
 });
+const { data: { session } } = await sb.auth.getSession();
+onUser(session?.user || null);

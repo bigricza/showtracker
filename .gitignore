@@ -1,12 +1,10 @@
-# Your Firebase project details (see public/firebase-config.example.js)
-public/firebase-config.js
-.firebaserc
+# Generated at build time from environment variables
+public/config.js
 
-# Firebase CLI
-.firebase/
-firebase-debug.log
-firestore-debug.log
-ui-debug.log
+# Vercel / Supabase local state
+.vercel/
+.env*
+supabase/.temp/
 
 # Backups exported from the app
 showtracker-backup-*.json

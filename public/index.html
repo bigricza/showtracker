@@ -17,8 +17,14 @@
 <section class="gate" id="gate" hidden>
   <h1><i aria-hidden="true"></i>Show Tracker</h1>
   <p>Track every show you're watching, see what's next, and know when new episodes air. Your progress syncs across your phone and laptop.</p>
-  <button class="btn primary" id="signInBtn" type="button">Sign in with Google</button>
-  <p class="code" id="gateMsg"></p>
+  <form class="signin" id="signInForm">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <button class="btn primary" id="signInBtn" type="submit">Sign in</button>
+  </form>
+  <p class="code" id="gateMsg" role="alert"></p>
 </section>
 
 <!-- App -->
@@ -33,7 +39,6 @@
         </form>
         <div class="user">
           <span class="sync" id="sync">Synced</span>
-          <img id="avatar" alt="" referrerpolicy="no-referrer" hidden>
           <span class="nm" id="userName"></span>
           <button class="btn small" id="signOutBtn" type="button">Sign out</button>
         </div>
