@@ -16,7 +16,7 @@
 <!-- Signed-out screen -->
 <section class="gate" id="gate" hidden>
   <h1><i aria-hidden="true"></i>Show Tracker</h1>
-  <p>Track every show you're watching, see what's next, and know when new episodes air. Your progress syncs across your phone and laptop.</p>
+  <p>Track every show you're watching, keep a watchlist of movies, and know when new episodes air. Your progress syncs across your phone and laptop.</p>
   <form class="signin" id="signInForm">
     <label for="email">Email</label>
     <input id="email" type="email" autocomplete="username" required>
@@ -35,7 +35,7 @@
         <h1 class="brand"><i aria-hidden="true"></i>Show Tracker</h1>
         <form class="search" id="searchForm" role="search">
           <svg viewBox="0 0 24 24" fill="none" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-          <input id="q" type="search" placeholder="Search for a show to add" autocomplete="off" aria-label="Search shows">
+          <input id="q" type="search" placeholder="Search shows and movies to add" autocomplete="off" aria-label="Search shows and movies">
         </form>
         <div class="user">
           <span class="sync" id="sync">Synced</span>
@@ -47,6 +47,7 @@
         <button class="tab" role="tab" data-view="next" aria-selected="true">Up next<span class="n" id="nNext"></span></button>
         <button class="tab" role="tab" data-view="coming">Coming up<span class="n" id="nComing"></span></button>
         <button class="tab" role="tab" data-view="library">All shows<span class="n" id="nLib"></span></button>
+        <button class="tab" role="tab" data-view="movies">Movies<span class="n" id="nMovies"></span></button>
         <button class="tab" role="tab" data-view="search" id="searchTab" hidden>Search results</button>
       </nav>
     </div>

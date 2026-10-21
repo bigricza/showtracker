@@ -147,3 +147,5 @@ details.season[open] summary .chev{transform:rotate(90deg)}
 .fchip[aria-pressed="true"]{background:var(--fg);border-color:var(--fg);color:var(--bg)}
 .hidden-note{color:var(--muted);font-size:.85rem;margin:6px 0 0}
 .linkbtn{background:none;border:0;padding:0;color:var(--accent);font-weight:600;text-decoration:underline;cursor:pointer}
+.panel-title{font:800 1.5rem/1.1 var(--display);letter-spacing:-.02em;margin:0}
+.row .act .btn + .btn{margin-left:0}

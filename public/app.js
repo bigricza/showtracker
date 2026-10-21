@@ -17,18 +17,22 @@ try {
 }
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
 const TABLE = "showtracker_shows";
+const MOVIES = "showtracker_movies";
 
 /* ---------- constants & state ---------- */
 const API = "https://api.tvmaze.com";
 const EP_CACHE_KEY = "showtracker-eps-v1";
 const ROWS_CACHE_KEY = "showtracker-rows-v1";
+const MOVIE_ROWS_CACHE_KEY = "showtracker-movie-rows-v1";
 const REFRESH_MS = 12 * 3600e3;
 
 let user = null, channel = null;
 let shows = {};                 // showId -> { id, name, image, ..., myLink, watched, addedAt, lastTouch }
 let epCache = loadJSON(EP_CACHE_KEY, {});
-let view = "next", searchResults = [], openShowId = null, searching = false, editingLink = false;
-let loaded = false, pending = 0;
+let movies = {};                // movieKey -> { key, title, year, genre, runtime, poster, ..., myLink, status, watchedAt, addedAt }
+let view = "next", searchResults = [], movieResults = [], movieSearchFailed = false, lastQuery = "";
+let openShowId = null, openMovieKey = null, searching = false, editingLink = false;
+let loaded = false, moviesLoaded = false, pending = 0;
 const fetching = new Set();
 
 function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
@@ -107,8 +111,32 @@ async function loadShows() {
   render();
   loadMissingEpisodes();
 }
+const fromMovieRow = r => ({
+  ...(r.info || {}), key: r.movie_key, myLink: r.my_link, status: r.status,
+  watchedAt: r.watched_at ? Date.parse(r.watched_at) : null, addedAt: Date.parse(r.added_at)
+});
+const toMovieRow = m => ({
+  movie_key: m.key,
+  info: { title: m.title, year: m.year ?? null, released: m.released ?? null, genre: m.genre ?? null, runtime: m.runtime ?? null,
+          rating: m.rating ?? null, director: m.director ?? null, summary: (m.summary || "").slice(0, 1500),
+          poster: m.poster ?? null, storeUrl: m.storeUrl ?? null },
+  my_link: m.myLink ?? null, status: m.status === "watched" ? "watched" : "want",
+  watched_at: m.watchedAt ? new Date(m.watchedAt).toISOString() : null,
+  added_at: new Date(m.addedAt || now()).toISOString(), updated_at: new Date().toISOString()
+});
+
+async function loadMovies() {
+  const { data, error } = await sb.from(MOVIES).select("*");
+  if (error) { toast(`Couldn't load your movies (${error.message}).`); return; }
+  movies = Object.fromEntries(data.map(r => [r.movie_key, fromMovieRow(r)]));
+  saveJSON(MOVIE_ROWS_CACHE_KEY + ":" + user.id, data);
+  moviesLoaded = true;
+  render();
+}
+const loadAll = () => Promise.all([loadShows(), loadMovies()]);
+
 let reloadTimer;
-const scheduleReload = () => { clearTimeout(reloadTimer); reloadTimer = setTimeout(() => { if (!pending) loadShows(); else scheduleReload(); }, 400); };
+const scheduleReload = () => { clearTimeout(reloadTimer); reloadTimer = setTimeout(() => { if (!pending) loadAll(); else scheduleReload(); }, 400); };
 
 /* Fetch episodes (and fresh details) from TVmaze. Episodes stay in a local cache; only detail changes are saved. */
 async function loadEpisodes(id, { force = false } = {}) {
@@ -203,6 +231,43 @@ async function saveLink(id, url) {
   catch (e) { s.myLink = prev; render(); toast("Couldn't save the link. Try again."); }
 }
 
+/* ---------- movie writes ---------- */
+async function addMovie(m, { status = "want" } = {}) {
+  if (movies[m.key]) { openMovie(m.key); return; }
+  const movie = { ...m, myLink: m.myLink ?? null, status, watchedAt: status === "watched" ? now() : null, addedAt: now() };
+  movies[m.key] = movie; render();
+  try { await track(sb.from(MOVIES).insert(toMovieRow(movie))); toast(`Added ${m.title} to ${status === "watched" ? "watched" : "your watchlist"}`); }
+  catch (e) { delete movies[m.key]; render(); toast(`Couldn't add ${m.title}. Check your connection and try again.`); }
+}
+
+async function setMovieStatus(key, status, { undoable = true } = {}) {
+  const m = movies[key]; if (!m || m.status === status) return;
+  const before = { status: m.status, watchedAt: m.watchedAt };
+  m.status = status; m.watchedAt = status === "watched" ? now() : null; render();
+  if (undoable) lastUndo = () => setMovieStatus(key, before.status, { undoable: false });
+  try {
+    await track(sb.from(MOVIES).update({
+      status, watched_at: m.watchedAt ? new Date(m.watchedAt).toISOString() : null, updated_at: new Date().toISOString()
+    }).eq("movie_key", key));
+  } catch (e) { Object.assign(m, before); render(); toast("Couldn't save that change. Check your connection."); }
+}
+
+async function removeMovie(key) {
+  const snapshot = movies[key]; if (!snapshot) return;
+  closeShow();
+  delete movies[key]; render();
+  lastUndo = async () => { movies[key] = snapshot; render(); await track(sb.from(MOVIES).upsert(toMovieRow(snapshot))); };
+  try { await track(sb.from(MOVIES).delete().eq("movie_key", key)); toast(`Removed ${snapshot.title}`, true); }
+  catch (e) { movies[key] = snapshot; render(); toast("Couldn't remove the movie. Try again."); }
+}
+
+async function saveMovieLink(key, url) {
+  const m = movies[key]; if (!m) return;
+  const prev = m.myLink; m.myLink = url; render();
+  try { await track(sb.from(MOVIES).update({ my_link: url, updated_at: new Date().toISOString() }).eq("movie_key", key)); toast(url ? "Link saved" : "Link removed"); }
+  catch (e) { m.myLink = prev; render(); toast("Couldn't save the link. Try again."); }
+}
+
 /* ---------- toast ---------- */
 let toastTimer;
 function toast(msg, undo) {
@@ -284,6 +349,84 @@ const filterBar = counts => `<div class="filters" role="group" aria-label="Filte
     ${esc(f.label)}<span class="n">${counts[f.key]}</span></button>`).join("")}
 </div>`;
 
+/* ---------- movies: rows & filters ---------- */
+const MOVIE_FILTERS = [
+  { key: "want", label: "Want to watch", hint: "Movies on your watchlist" },
+  { key: "watched", label: "Watched", hint: "Movies you've seen" }
+];
+const MOVIE_FILTER_KEY = "showtracker-movie-filters-v1";
+let movieFilters = new Set(loadJSON(MOVIE_FILTER_KEY, ["want"]));
+function setMovieFilters(keys) { movieFilters = new Set(keys); saveJSON(MOVIE_FILTER_KEY, [...movieFilters]); render(); }
+
+const fmtRuntime = mins => mins ? (mins >= 60 ? `${Math.floor(mins / 60)}h ${pad(mins % 60)}m` : `${mins}m`) : null;
+const movieMeta = m => [m.year, m.genre, fmtRuntime(m.runtime)].filter(Boolean).join(" · ");
+const shortDate = t => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+
+function movieRow(m) {
+  const act = m.status === "watched"
+    ? `<span class="chip good">Watched${m.watchedAt ? ` ${esc(shortDate(m.watchedAt))}` : ""}</span>`
+    : `<button class="btn primary small" data-act="movieWatched" data-key="${esc(m.key)}">Mark watched</button>`;
+  return `<article class="row">
+    ${posterImg(m.poster)}
+    <div class="info">
+      <button class="title" data-act="openMovie" data-key="${esc(m.key)}">${esc(m.title)}</button>
+      <div class="meta">${esc(movieMeta(m) || "Movie")}</div>
+      ${m.director ? `<div class="meta">${esc(m.director)}</div>` : ""}
+    </div>
+    <div class="act">${m.myLink ? `<a class="btn small" href="${esc(m.myLink)}" target="_blank" rel="noopener" title="${esc(m.myLink)}">Open ↗</a>` : ""}${act}</div>
+  </article>`;
+}
+
+function moviesView() {
+  const list = Object.values(movies);
+  if (!moviesLoaded && !list.length) return `<div class="loading">Loading your movies…</div>`;
+  if (!list.length) return `<section class="empty">
+    <h3>Start your movie watchlist</h3>
+    <p>Search above for a movie and tap Add to watchlist. Paste a link on any movie to jump straight to wherever you'll watch it. Not in the results? You can add any title by hand.</p>
+  </section>`;
+  const counts = { want: 0, watched: 0 };
+  list.forEach(m => counts[m.status]++);
+  const visible = list.filter(m => movieFilters.has(m.status)).sort((a, b) =>
+    a.status !== b.status ? (a.status === "want" ? -1 : 1)
+    : a.status === "watched" ? (b.watchedAt || 0) - (a.watchedAt || 0)
+    : (b.addedAt || 0) - (a.addedAt || 0));
+  const hidden = list.length - visible.length;
+  let html = `<div class="filters" role="group" aria-label="Filter movies">
+    ${MOVIE_FILTERS.map(f => `<button type="button" class="fchip" data-act="movieFilter" data-f="${f.key}" aria-pressed="${movieFilters.has(f.key)}" title="${esc(f.hint)}">
+      ${esc(f.label)}<span class="n">${counts[f.key]}</span></button>`).join("")}
+  </div>`;
+  html += visible.length ? visible.map(movieRow).join("")
+    : `<div class="empty"><h3>${movieFilters.size ? "Nothing matches these filters" : "No filters selected"}</h3><p>Turn on another filter above to see more of your movies.</p></div>`;
+  if (hidden) html += `<p class="hidden-note">${hidden} movie${hidden === 1 ? "" : "s"} hidden by filters. <button class="linkbtn" data-act="movieFilterAll">Show all</button></p>`;
+  return html;
+}
+
+function searchView() {
+  if (searching) return `<div class="loading">Searching…</div>`;
+  const showHtml = searchResults.map(({ show: s }) => {
+    const yr = s.premiered ? s.premiered.slice(0, 4) : "";
+    const net = s.webChannel?.name || s.network?.name || "";
+    return `<article class="row">${posterImg(s.image?.medium)}
+      <div class="info"><span class="title" style="cursor:default">${esc(s.name)}</span>
+        <div class="meta">${esc([yr, net, s.status].filter(Boolean).join(" · "))}</div>
+        <div class="meta">${esc((s.genres || []).join(", "))}</div></div>
+      <div class="act">${shows[s.id] ? `<button class="btn small" data-act="open" data-id="${s.id}">Open</button>` : `<button class="btn primary small" data-act="add" data-id="${s.id}" data-name="${esc(s.name)}">Add show</button>`}</div>
+    </article>`;
+  }).join("");
+  const movieHtml = movieResults.map((m, i) => `<article class="row">${posterImg(m.poster)}
+      <div class="info"><span class="title" style="cursor:default">${esc(m.title)}</span>
+        <div class="meta">${esc(movieMeta(m))}</div>
+        ${m.director ? `<div class="meta">${esc(m.director)}</div>` : ""}</div>
+      <div class="act">${movies[m.key]
+        ? `<button class="btn small" data-act="openMovie" data-key="${esc(m.key)}">Open</button>`
+        : `<button class="btn small" data-act="addMovieWatched" data-i="${i}">Seen it</button><button class="btn primary small" data-act="addMovie" data-i="${i}">Add to watchlist</button>`}</div>
+    </article>`).join("");
+  const manual = `<p class="hidden-note">Can't find the movie? <button class="linkbtn" data-act="addManualMovie">Add “${esc(lastQuery)}” as a movie by hand</button></p>`;
+  return `<h2 class="sec">TV shows</h2>${showHtml || `<p class="hidden-note">No shows match “${esc(lastQuery)}”.</p>`}
+    <h2 class="sec">Movies</h2>${movieHtml || `<p class="hidden-note">${movieSearchFailed ? "Movie search isn't available right now." : `No movies match “${esc(lastQuery)}”.`}</p>`}
+    ${manual}`;
+}
+
 function render() {
   if (!user) return;
   const list = Object.values(shows);
@@ -292,23 +435,15 @@ function render() {
   $("#nNext").textContent = withNext.length || "";
   $("#nComing").textContent = coming.length || "";
   $("#nLib").textContent = list.length || "";
+  $("#nMovies").textContent = Object.values(movies).filter(m => m.status === "want").length || "";
   document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.view === view));
   $("#searchTab").hidden = view !== "search";
 
   let html = "";
   if (view === "search") {
-    if (searching) html = `<div class="loading">Searching…</div>`;
-    else if (!searchResults.length) html = `<div class="empty"><h3>No shows found</h3><p>Try a shorter title or check the spelling.</p></div>`;
-    else html = searchResults.map(({ show: s }) => {
-      const yr = s.premiered ? s.premiered.slice(0, 4) : "";
-      const net = s.webChannel?.name || s.network?.name || "";
-      return `<article class="row">${posterImg(s.image?.medium)}
-        <div class="info"><span class="title" style="cursor:default">${esc(s.name)}</span>
-          <div class="meta">${esc([yr, net, s.status].filter(Boolean).join(" · "))}</div>
-          <div class="meta">${esc((s.genres || []).join(", "))}</div></div>
-        <div class="act">${shows[s.id] ? `<button class="btn small" data-act="open" data-id="${s.id}">Open</button>` : `<button class="btn primary small" data-act="add" data-id="${s.id}" data-name="${esc(s.name)}">Add show</button>`}</div>
-      </article>`;
-    }).join("");
+    html = searchView();
+  } else if (view === "movies") {
+    html = moviesView();
   } else if (!loaded) {
     html = `<div class="loading">Loading your shows…</div>`;
   } else if (!list.length) {
@@ -334,6 +469,65 @@ function render() {
   }
   $("#main").innerHTML = html + footer();
   if (openShowId) renderPanel();
+  else if (openMovieKey) renderMoviePanel();
+}
+
+function linkBox(link, name, kind, draft) {
+  return `<div class="mylink">
+    ${editingLink || !link
+      ? `<form class="linkform" id="linkForm">
+          <input id="linkInput" type="url" placeholder="Paste the link to where you watch this ${kind}" value="${esc(draft ?? link ?? "")}" aria-label="My link for ${esc(name)}">
+          <button class="btn small primary" type="submit">Save link</button>
+          ${link ? `<button class="btn small" type="button" data-act="linkCancel">Cancel</button>` : ""}
+        </form>`
+      : `<strong>My link</strong><span class="url">${esc(link)}</span>
+         <a class="btn small primary" href="${esc(link)}" target="_blank" rel="noopener">Open ↗</a>
+         <button class="btn small" data-act="linkEdit">Edit</button>
+         <button class="btn small" data-act="linkClear">Remove</button>`}
+  </div>`;
+}
+
+function renderMoviePanel() {
+  const m = movies[openMovieKey]; if (!m) return closeShow();
+  const panel = $("#panel");
+  const linkDraft = $("#linkInput")?.value;
+  const jw = `https://www.justwatch.com/za/search?q=${encodeURIComponent(m.title)}`;
+  panel.innerHTML = `
+    <button class="btn small close" data-act="close">Close</button>
+    <div class="ph">${posterImg(m.poster)}
+      <div style="min-width:0">
+        <h2>${esc(m.title)}</h2>
+        <div class="chips">
+          <span class="chip">Movie</span>
+          ${m.year ? `<span class="chip">${m.year}</span>` : ""}
+          ${m.genre ? `<span class="chip">${esc(m.genre)}</span>` : ""}
+          ${m.runtime ? `<span class="chip">${esc(fmtRuntime(m.runtime))}</span>` : ""}
+          ${m.rating ? `<span class="chip">${esc(m.rating)}</span>` : ""}
+          <span class="chip ${m.status === "watched" ? "good" : ""}">${m.status === "watched" ? `Watched${m.watchedAt ? " " + esc(shortDate(m.watchedAt)) : ""}` : "On your watchlist"}</span>
+        </div>
+        ${m.director ? `<p class="summary">Directed by ${esc(m.director)}</p>` : ""}
+        ${m.summary ? `<p class="summary">${esc(m.summary)}</p>` : ""}
+      </div>
+    </div>
+    <div class="where">
+      <span>Where to watch:</span>
+      <a href="${jw}" target="_blank" rel="noopener">Streaming options in SA ↗</a>
+      ${m.storeUrl ? `<a href="${esc(m.storeUrl)}" target="_blank" rel="noopener">Apple TV store ↗</a>` : ""}
+      ${linkBox(m.myLink, m.title, "movie", linkDraft)}
+    </div>
+    <div class="actions">
+      ${m.status === "watched"
+        ? `<button class="btn" data-act="movieWant" data-key="${esc(m.key)}">Move back to watchlist</button>`
+        : `<button class="btn primary" data-act="movieWatched" data-key="${esc(m.key)}">Mark watched</button>`}
+      <button class="btn" data-act="removeMovie" data-key="${esc(m.key)}">Remove movie</button>
+    </div>`;
+}
+
+function openMovie(key) {
+  openShowId = null; openMovieKey = key; editingLink = false;
+  const panel = $("#panel"); panel.innerHTML = ""; panel.hidden = false; $("#scrim").hidden = false;
+  document.body.style.overflow = "hidden";
+  renderMoviePanel();
 }
 
 function renderPanel() {
@@ -367,18 +561,7 @@ function renderPanel() {
       ${s.network ? `<strong>${esc(s.network)}</strong>` : ""}
       ${s.officialSite ? `<a href="${esc(s.officialSite)}" target="_blank" rel="noopener">Official page ↗</a>` : ""}
       <a href="${jw}" target="_blank" rel="noopener">Streaming options in SA ↗</a>
-      <div class="mylink">
-        ${editingLink || !s.myLink
-          ? `<form class="linkform" id="linkForm">
-              <input id="linkInput" type="url" placeholder="Paste the link to where you watch this show" value="${esc(linkDraft ?? s.myLink ?? "")}" aria-label="My link for ${esc(s.name)}">
-              <button class="btn small primary" type="submit">Save link</button>
-              ${s.myLink ? `<button class="btn small" type="button" data-act="linkCancel">Cancel</button>` : ""}
-            </form>`
-          : `<strong>My link</strong><span class="url">${esc(s.myLink)}</span>
-             <a class="btn small primary" href="${esc(s.myLink)}" target="_blank" rel="noopener">Open ↗</a>
-             <button class="btn small" data-act="linkEdit">Edit</button>
-             <button class="btn small" data-act="linkClear">Remove</button>`}
-      </div>
+      ${linkBox(s.myLink, s.name, "show", linkDraft)}
     </div>
     <div class="actions">
       ${p.next ? `<button class="btn primary" data-act="watch" data-show="${s.id}" data-ep="${p.next.id}">Watched ${code(p.next)}</button>` : ""}
@@ -412,26 +595,54 @@ function renderPanel() {
 }
 
 function openShow(id) {
-  openShowId = String(id); editingLink = false;
+  openMovieKey = null; openShowId = String(id); editingLink = false;
   const panel = $("#panel"); panel.innerHTML = ""; panel.hidden = false; $("#scrim").hidden = false;
   document.body.style.overflow = "hidden";
   renderPanel();
   if (!epCache[openShowId]) loadEpisodes(openShowId).then(render).catch(() => {});
 }
-function closeShow() { openShowId = null; $("#panel").hidden = true; $("#scrim").hidden = true; document.body.style.overflow = ""; }
+function closeShow() { openShowId = null; openMovieKey = null; $("#panel").hidden = true; $("#scrim").hidden = true; document.body.style.overflow = ""; }
 
 /* ---------- search ---------- */
+async function searchMovies(q) {
+  const r = await fetch(`/api/movies?q=${encodeURIComponent(q)}`);
+  if (!r.ok) throw new Error(`Movie search returned ${r.status}`);
+  return (await r.json()).results || [];
+}
+
 async function doSearch(q) {
   q = q.trim(); if (!q) return;
-  view = "search"; searching = true; render();
-  try { searchResults = await api(`/search/shows?q=${encodeURIComponent(q)}`); }
-  catch (e) { searchResults = []; toast("Search failed. Check your connection and try again."); }
+  lastQuery = q; view = "search"; searching = true; render();
+  const [showRes, movieRes] = await Promise.allSettled([api(`/search/shows?q=${encodeURIComponent(q)}`), searchMovies(q)]);
+  searchResults = showRes.status === "fulfilled" ? showRes.value : [];
+  movieResults = movieRes.status === "fulfilled" ? movieRes.value : [];
+  movieSearchFailed = movieRes.status === "rejected";
+  if (showRes.status === "rejected" && movieSearchFailed) toast("Search failed. Check your connection and try again.");
   searching = false; render();
+}
+
+function openManualMovie(title) {
+  openShowId = null; openMovieKey = null;
+  const panel = $("#panel"); panel.hidden = false; $("#scrim").hidden = false;
+  document.body.style.overflow = "hidden";
+  panel.innerHTML = `
+    <button class="btn small close" data-act="close">Close</button>
+    <h2 class="panel-title">Add a movie by hand</h2>
+    <form class="signin" id="manualMovieForm">
+      <label for="mmTitle">Title</label>
+      <input id="mmTitle" required maxlength="200" value="${esc(title)}">
+      <label for="mmYear">Year (optional)</label>
+      <input id="mmYear" type="number" min="1880" max="2100" inputmode="numeric">
+      <label for="mmLink">Where to watch it (optional)</label>
+      <input id="mmLink" type="url" placeholder="https://…">
+      <button class="btn primary" type="submit">Add to watchlist</button>
+    </form>`;
+  $("#mmTitle").focus();
 }
 
 /* ---------- backup ---------- */
 function exportBackup() {
-  const data = { app: "showtracker", version: 2, exportedAt: new Date().toISOString(), shows };
+  const data = { app: "showtracker", version: 3, exportedAt: new Date().toISOString(), shows, movies };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = `showtracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
@@ -440,7 +651,8 @@ function exportBackup() {
 
 // Accepts this app's backups (version 2) and the single-file Episode Log backups (shows with eps + a flat watched map).
 async function importBackup(data) {
-  if (!data?.shows) throw new Error("bad file");
+  if (!data?.shows && !data?.movies) throw new Error("bad file");
+  data.shows ||= {};
   const rows = [];
   for (const [id, s] of Object.entries(data.shows)) {
     let watched = s.watched || {};
@@ -453,8 +665,11 @@ async function importBackup(data) {
   }
   saveEpCache();
   for (let i = 0; i < rows.length; i += 200) await track(sb.from(TABLE).upsert(rows.slice(i, i + 200)));
-  await loadShows();
-  return rows.length;
+  const movieRows = Object.values(data.movies || {}).filter(m => m?.key && m?.title)
+    .map(m => toMovieRow({ ...m, myLink: m.myLink ?? movies[m.key]?.myLink ?? null }));
+  for (let i = 0; i < movieRows.length; i += 200) await track(sb.from(MOVIES).upsert(movieRows.slice(i, i + 200)));
+  await loadAll();
+  return rows.length + movieRows.length;
 }
 
 /* ---------- events ---------- */
@@ -471,10 +686,10 @@ $("#signOutBtn").addEventListener("click", () => sb.auth.signOut());
 $("#searchForm").addEventListener("submit", e => { e.preventDefault(); $("#q").blur(); doSearch($("#q").value); });
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => { view = t.dataset.view; render(); }));
 $("#scrim").addEventListener("click", closeShow);
-document.addEventListener("keydown", e => { if (e.key === "Escape" && openShowId) closeShow(); });
-window.addEventListener("online", () => { setSync(); if (user) loadShows(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#panel").hidden) closeShow(); });
+window.addEventListener("online", () => { setSync(); if (user) loadAll(); });
 window.addEventListener("offline", setSync);
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && user) loadShows(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && user) loadAll(); });
 
 const showIdOfEp = epId => Object.keys(shows).find(id => epsOf(id).some(e => e.id === epId));
 
@@ -490,6 +705,21 @@ document.addEventListener("click", async e => {
     setFilters([...next]);
   }
   else if (a === "filterAll") setFilters(FILTERS.map(f => f.key));
+  else if (a === "movieFilter") {
+    const f = el.dataset.f, next = new Set(movieFilters);
+    next.has(f) ? next.delete(f) : next.add(f);
+    setMovieFilters([...next]);
+  }
+  else if (a === "movieFilterAll") setMovieFilters(MOVIE_FILTERS.map(f => f.key));
+  else if (a === "openMovie") openMovie(el.dataset.key);
+  else if (a === "addMovie" || a === "addMovieWatched") {
+    const m = movieResults[Number(el.dataset.i)];
+    if (m) addMovie(m, { status: a === "addMovieWatched" ? "watched" : "want" });
+  }
+  else if (a === "addManualMovie") openManualMovie(lastQuery);
+  else if (a === "movieWatched") { const m = movies[el.dataset.key]; setMovieStatus(el.dataset.key, "watched"); toast(`Marked ${m?.title} as watched`, true); }
+  else if (a === "movieWant") { const m = movies[el.dataset.key]; setMovieStatus(el.dataset.key, "want"); toast(`Moved ${m?.title} back to your watchlist`, true); }
+  else if (a === "removeMovie") removeMovie(el.dataset.key);
   else if (a === "suggest") { $("#q").value = el.dataset.q; doSearch(el.dataset.q); }
   else if (a === "watch") {
     const epId = Number(el.dataset.ep), id = el.dataset.show || showIdOfEp(epId);
@@ -508,9 +738,9 @@ document.addEventListener("click", async e => {
     const ids = epsOf(id).filter(x => x.s === Number(el.dataset.s) && aired(x)).map(x => x.id);
     setWatched(id, ids, on); toast(`${on ? "Marked" : "Unmarked"} season ${el.dataset.s}`, true);
   }
-  else if (a === "linkEdit") { editingLink = true; renderPanel(); $("#linkInput")?.focus(); }
-  else if (a === "linkCancel") { editingLink = false; renderPanel(); }
-  else if (a === "linkClear") { editingLink = false; saveLink(openShowId, null); }
+  else if (a === "linkEdit") { editingLink = true; openMovieKey ? renderMoviePanel() : renderPanel(); $("#linkInput")?.focus(); }
+  else if (a === "linkCancel") { editingLink = false; openMovieKey ? renderMoviePanel() : renderPanel(); }
+  else if (a === "linkClear") { editingLink = false; openMovieKey ? saveMovieLink(openMovieKey, null) : saveLink(openShowId, null); }
   else if (a === "remove") removeShow(el.dataset.id);
   else if (a === "refreshOne") {
     try { await loadEpisodes(el.dataset.id, { force: true }); render(); toast("Episode list updated"); }
@@ -531,16 +761,33 @@ document.addEventListener("change", e => {
   if (el.dataset?.act === "toggle") setWatched(openShowId, [Number(el.dataset.ep)], el.checked);
 });
 
-document.addEventListener("submit", e => {
-  if (e.target.id !== "linkForm") return;
-  e.preventDefault();
-  let v = $("#linkInput").value.trim();
-  if (!v) return;
+// Returns a cleaned-up URL, or null (after telling the user) if it isn't usable.
+function cleanLink(v) {
+  v = v.trim();
+  if (!v) return null;
   if (!/^https?:\/\//i.test(v)) v = "https://" + v;
-  try { new URL(v); } catch (err) { toast("That doesn't look like a web address. Paste the full link."); return; }
-  if (v.length > 2000) { toast("That link is too long to save."); return; }
-  editingLink = false;
-  saveLink(openShowId, v);
+  try { new URL(v); } catch (err) { toast("That doesn't look like a web address. Paste the full link."); return null; }
+  if (v.length > 2000) { toast("That link is too long to save."); return null; }
+  return v;
+}
+
+document.addEventListener("submit", e => {
+  if (e.target.id === "linkForm") {
+    e.preventDefault();
+    const v = cleanLink($("#linkInput").value); if (!v) return;
+    editingLink = false;
+    openMovieKey ? saveMovieLink(openMovieKey, v) : saveLink(openShowId, v);
+  } else if (e.target.id === "manualMovieForm") {
+    e.preventDefault();
+    const title = $("#mmTitle").value.trim(); if (!title) return;
+    const year = Number($("#mmYear").value) || null;
+    const rawLink = $("#mmLink").value.trim();
+    const link = rawLink ? cleanLink(rawLink) : null;
+    if (rawLink && !link) return;
+    const key = "manual:" + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+    closeShow();
+    addMovie({ key, title, year, myLink: link });
+  }
 });
 
 $("#importFile").addEventListener("change", async e => {
@@ -549,7 +796,7 @@ $("#importFile").addEventListener("change", async e => {
   try {
     toast("Importing…", false);
     const n = await importBackup(JSON.parse(await f.text()));
-    toast(`Imported ${n} show${n === 1 ? "" : "s"}`);
+    toast(`Imported ${n} item${n === 1 ? "" : "s"}`);
     loadMissingEpisodes();
   } catch (err) { toast("That file isn't a Show Tracker or Episode Log backup."); }
 });
@@ -562,7 +809,7 @@ function onUser(u) {
   authResolved = true;
   user = u;
   if (channel) { sb.removeChannel(channel); channel = null; }
-  shows = {}; loaded = false; closeShow();
+  shows = {}; movies = {}; loaded = false; moviesLoaded = false; closeShow();
   $("#gate").hidden = !!u;
   $("#app").hidden = !u;
   if (!u) return;
@@ -570,10 +817,13 @@ function onUser(u) {
   $("#userName").textContent = u.email || "";
   const cached = loadJSON(ROWS_CACHE_KEY + ":" + u.id, null);
   if (cached) { shows = Object.fromEntries(cached.map(r => [String(r.show_id), fromRow(r)])); loaded = true; }
+  const cachedMovies = loadJSON(MOVIE_ROWS_CACHE_KEY + ":" + u.id, null);
+  if (cachedMovies) { movies = Object.fromEntries(cachedMovies.map(r => [r.movie_key, fromMovieRow(r)])); moviesLoaded = true; }
   render(); setSync();
-  loadShows();
+  loadAll();
   channel = sb.channel("showtracker-" + u.id)
     .on("postgres_changes", { event: "*", schema: "public", table: TABLE, filter: `user_id=eq.${u.id}` }, scheduleReload)
+    .on("postgres_changes", { event: "*", schema: "public", table: MOVIES, filter: `user_id=eq.${u.id}` }, scheduleReload)
     .subscribe();
 }
 

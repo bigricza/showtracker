@@ -1,6 +1,8 @@
 # Show Tracker
 
-A personal TV episode tracker. Search for a show, and it pulls in every season and episode from the free [TVmaze API](https://www.tvmaze.com/api). Tick off what you've watched, see what's next for each show and what airs in the next 30 days, and save a link to wherever you watch each show.
+A personal TV and movie tracker. Search for a show, and it pulls in every season and episode from the free [TVmaze API](https://www.tvmaze.com/api). Tick off what you've watched, see what's next for each show and what airs in the next 30 days, and save a link to wherever you watch each show.
+
+Movies go on a watchlist. Add them from search (or by hand if they aren't found), save a link to where you'll watch each one, and mark them watched when you're done.
 
 Sign in with your email and password, and your progress syncs across devices. Changes made on one device show up on the others straight away.
 
@@ -8,7 +10,8 @@ Sign in with your email and password, and your progress syncs across devices. Ch
 
 - **Frontend:** plain HTML, CSS and JavaScript in `public/` (no framework, no bundler).
 - **Show data:** TVmaze, fetched in the browser. Episode lists are cached locally and refreshed every 12 hours.
-- **Auth and data:** [Supabase](https://supabase.com). Email and password sign-in through Supabase Auth, and one row per tracked show in the `showtracker_shows` table: the show's details, your link, and a `watched` map of episode ID to the time you marked it.
+- **Movie data:** the iTunes Search API (South African store), called through a small Vercel function at `api/movies.js` so the browser never talks to Apple directly. No API key is needed.
+- **Auth and data:** [Supabase](https://supabase.com). Email and password sign-in through Supabase Auth, and one row per tracked show in the `showtracker_shows` table: the show's details, your link, and a `watched` map of episode ID to the time you marked it. Movies live in `showtracker_movies`, one row per movie, with your link and a status of `want` or `watched`.
 - **Security:** row-level security means each signed-in user can only read and change their own rows. Episodes are marked through the `showtracker_set_watched` function, which merges changes so two devices can't overwrite each other.
 - **Hosting:** [Vercel](https://vercel.com), deployed automatically on every push to `main`.
 
@@ -16,7 +19,7 @@ Sign in with your email and password, and your progress syncs across devices. Ch
 
 ### Database
 
-Run `supabase/migrations/20261005000000_showtracker_init.sql` against your Supabase project, either in the SQL editor or with `supabase db push`. Table and function names are prefixed with `showtracker_`, so the app can share a project with other apps.
+Run the files in `supabase/migrations/` in order against your Supabase project, either in the SQL editor or with `supabase db push`. Table and function names are prefixed with `showtracker_`, so the app can share a project with other apps.
 
 Sign-in uses the project's existing email and password accounts. The app has no sign-up screen, so create accounts under **Authentication > Users** in the Supabase dashboard.
 
@@ -37,8 +40,10 @@ On Vercel, import the repo and add the two variables. `vercel.json` sets the bui
 
 ```bash
 SUPABASE_URL=... SUPABASE_KEY=... node scripts/write-config.mjs
-npx serve public
+npx vercel dev
 ```
+
+`vercel dev` serves `public/` and runs the movie search function. A plain static server works too, but movie search won't.
 
 ## Moving over from the single-file version
 
@@ -46,4 +51,4 @@ In the old `episode-tracker.html`, click **Export backup**. Then sign in to Show
 
 ## Credits
 
-Show and episode data comes from [TVmaze](https://www.tvmaze.com), licensed under CC BY-SA.
+Show and episode data comes from [TVmaze](https://www.tvmaze.com), licensed under CC BY-SA. Movie details come from the iTunes Search API.
