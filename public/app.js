@@ -487,6 +487,8 @@ function linkBox(link, name, kind, draft) {
   </div>`;
 }
 
+const storeLabel = url => /imdb\.com/.test(url) ? "IMDb page" : /wikidata\.org/.test(url) ? "Wikidata page" : /apple\.com/.test(url) ? "Apple TV store" : "More info";
+
 function renderMoviePanel() {
   const m = movies[openMovieKey]; if (!m) return closeShow();
   const panel = $("#panel");
@@ -512,7 +514,7 @@ function renderMoviePanel() {
     <div class="where">
       <span>Where to watch:</span>
       <a href="${jw}" target="_blank" rel="noopener">Streaming options in SA ↗</a>
-      ${m.storeUrl ? `<a href="${esc(m.storeUrl)}" target="_blank" rel="noopener">Apple TV store ↗</a>` : ""}
+      ${m.storeUrl ? `<a href="${esc(m.storeUrl)}" target="_blank" rel="noopener">${esc(storeLabel(m.storeUrl))} ↗</a>` : ""}
       ${linkBox(m.myLink, m.title, "movie", linkDraft)}
     </div>
     <div class="actions">

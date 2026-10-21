@@ -10,7 +10,7 @@ Sign in with your email and password, and your progress syncs across devices. Ch
 
 - **Frontend:** plain HTML, CSS and JavaScript in `public/` (no framework, no bundler).
 - **Show data:** TVmaze, fetched in the browser. Episode lists are cached locally and refreshed every 12 hours.
-- **Movie data:** the iTunes Search API (South African store), called through a small Vercel function at `api/movies.js` so the browser never talks to Apple directly. No API key is needed.
+- **Movie data:** a small Vercel function at `api/movies.js` searches two free sources and ranks the combined results. The iTunes Search API (South African and US stores) gives posters and full details for movies you can buy or rent. [Wikidata](https://www.wikidata.org) covers almost every film, including new and upcoming releases, and matches partial titles. No API keys are needed.
 - **Auth and data:** [Supabase](https://supabase.com). Email and password sign-in through Supabase Auth, and one row per tracked show in the `showtracker_shows` table: the show's details, your link, and a `watched` map of episode ID to the time you marked it. Movies live in `showtracker_movies`, one row per movie, with your link and a status of `want` or `watched`.
 - **Security:** row-level security means each signed-in user can only read and change their own rows. Episodes are marked through the `showtracker_set_watched` function, which merges changes so two devices can't overwrite each other.
 - **Hosting:** [Vercel](https://vercel.com), deployed automatically on every push to `main`.
@@ -51,4 +51,4 @@ In the old `episode-tracker.html`, click **Export backup**. Then sign in to Show
 
 ## Credits
 
-Show and episode data comes from [TVmaze](https://www.tvmaze.com), licensed under CC BY-SA. Movie details come from the iTunes Search API.
+Show and episode data comes from [TVmaze](https://www.tvmaze.com), licensed under CC BY-SA. Movie details come from the iTunes Search API and [Wikidata](https://www.wikidata.org) (CC0).
